@@ -1,9 +1,65 @@
 import os
+import sys
 from typing import List
 import platform
 import shutil
 import stat
 import time
+
+ENV_VARS = dict(os.environ)  # Initialize with current environment variables
+
+def expand_variables(tokens):
+    expanded_tokens = []
+    for token in tokens:
+        if token.startswith('$') and len(token) > 1:
+            key = token[1:]
+            value = ENV_VARS.get(key, "")
+            expanded_tokens.append(value)
+        else:
+            expanded_tokens.append(token)
+    return expanded_tokens
+
+def env_command(args):
+    lines = [f"{key}={value}" for key, value in ENV_VARS.items()]
+    return "\n".join(lines)
+
+def read_file(args):
+    if not args:
+        return sys.stdin.read().rstrip('\n')
+
+    output = []
+    for file_path in args:
+        try: 
+            with open(file_path, 'r') as f:
+                output.append(f.read().rstrip('\n'))
+        except Exception as e:
+            print(f"cat: {file_path}: {e}", file=sys.stderr)
+    return '\n'.join(output)
+
+def grep_command(args):
+    if not args:
+        return "Error: No pattern provided for grep."
+
+    pattern = args[0]
+    lines = []
+
+    if len(args) > 1:
+        filepath = args[1]
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            return f"grep: {filepath}: No such file or directory"
+        except Exception as e:
+            return f"grep: {filepath}: {e}"
+    else:
+        if not sys.stdin.isatty():
+            lines = sys.stdin.readlines()
+        else:
+            return "Error: No input provided for grep."
+        
+    matched_lines = [line.rstrip('\n') for line in lines if pattern in line]
+    return '\n'.join(matched_lines)
 
 def echo(args: List[str]) -> str:
     return " ".join(args) if args else ""
@@ -175,6 +231,8 @@ def help_command() -> str:
         "rm [path]": "Removes a file.",
         "cat [path]": "Displays the contents of a file.",
         "chmod [mode] [path]": "Changes the permissions of a file or directory.",
+        "env": "Displays all environment variables.",
+        "grep [pattern] [file]": "Searches for a pattern in a file.",
         "sysinfo": "Displays system information.",
         "help": "Displays this help message.",
         "exit": "Exits the command line interface."
@@ -199,6 +257,8 @@ COMMANDS = {
     "rm": remove_file,
     "cat": concatenate_file,
     "chmod": change_mode,
+    "env": env_command,
+    "grep": grep_command,
     "sysinfo": lambda _: get_system_info(),
     "help": lambda _: help_command(),
     "exit": lambda _: exit()
