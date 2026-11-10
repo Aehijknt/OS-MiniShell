@@ -2,12 +2,6 @@ from io import StringIO
 import os, re, subprocess, sys
 from commands import COMMANDS, ENV_VARS, expand_variables, CommandError
 
-try:
-    from utils import check_dir_exists
-except ImportError:  # fallback if utils.py is missing
-    def check_dir_exists(path):
-        return os.path.isdir(path)
-
 os.system("")  # enables ANSI colors in Windows cmd
 
 # Path to the root directory where main.py lives
@@ -203,8 +197,6 @@ def single_command(cmd_str, input_data=None):
                         status = 1
                     else:
                         print(result, end="" if result.endswith("\n") else "\n")
-        elif check_dir_exists(command):
-            os.chdir(command)
         else:
             status = run_external(clean_tokens)
 
