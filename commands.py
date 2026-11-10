@@ -5,13 +5,24 @@ import platform
 import shutil
 import stat
 import time
+import re
+
+class CommandError(Exception):
+    """Raised by a command to signal failure. code = exit status (0 = success).
+    An empty message means 'fail silently' (e.g. grep with no matches)."""
+    def __init__(self, message="", code=1):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+MODES = {}  # abs path -> mode set by chmod (Windows ignores rwx bits, so we remember them)
 
 ENV_VARS = dict(os.environ)  # Initialize with current environment variables
 
 def expand_variables(tokens):
     expanded_tokens = []
     for token in tokens:
-        if token.startswith('$') and len(token) > 1:
+        if re.fullmatch(r'\$[A-Za-z_]\w*', token):  # $NAME only; '$100' stays literal
             key = token[1:]
             value = ENV_VARS.get(key, "")
             expanded_tokens.append(value)
@@ -37,35 +48,68 @@ def read_file(args):
     return '\n'.join(output)
 
 def grep_command(args):
-    if not args:
-        return "Error: No pattern provided for grep."
-
-    pattern = args[0]
-    lines = []
-
-    if len(args) > 1:
-        filepath = args[1]
-        try:
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-        except FileNotFoundError:
-            return f"grep: {filepath}: No such file or directory"
-        except Exception as e:
-            return f"grep: {filepath}: {e}"
-    else:
-        if not sys.stdin.isatty():
-            lines = sys.stdin.readlines()
+    """grep [-i] [-n] [-v] PATTERN [FILE...]  (reads stdin if no file given)
+    Exit status: 0 = match found, 1 = no match, 2 = error."""
+    flags, rest = set(), []
+    for a in args:
+        if not rest and a.startswith('-') and len(a) > 1 and a[1:].isalpha():
+            flags.update(a[1:])
         else:
-            return "Error: No input provided for grep."
-        
-    matched_lines = [line.rstrip('\n') for line in lines if pattern in line]
-    return '\n'.join(matched_lines)
+            rest.append(a)
+
+    bad = flags - set("inv")
+    if bad:
+        raise CommandError(f"grep: invalid option -- '{sorted(bad)[0]}'", 2)
+    if not rest:
+        raise CommandError("grep: usage: grep [-inv] PATTERN [FILE...]", 2)
+
+    pattern, files = rest[0], rest[1:]
+    try:
+        rx = re.compile(pattern, re.IGNORECASE if 'i' in flags else 0)
+    except re.error as e:
+        raise CommandError(f"grep: invalid pattern '{pattern}': {e}", 2)
+
+    sources, had_error = [], False
+    if files:
+        for fp in files:
+            try:
+                with open(fp, 'r') as f:
+                    sources.append((fp, f.read().splitlines()))
+            except FileNotFoundError:
+                print(f"grep: {fp}: No such file or directory", file=sys.stderr)
+                had_error = True
+            except Exception as e:
+                print(f"grep: {fp}: {e}", file=sys.stderr)
+                had_error = True
+    else:
+        if sys.stdin.isatty():
+            raise CommandError("grep: no input (give a file or pipe something in)", 2)
+        sources.append((None, sys.stdin.read().splitlines()))
+
+    out = []
+    for name, lines in sources:
+        for num, line in enumerate(lines, 1):
+            hit = rx.search(line) is not None
+            if hit != ('v' in flags):
+                prefix = ""
+                if len(files) > 1:
+                    prefix += f"{name}:"
+                if 'n' in flags:
+                    prefix += f"{num}:"
+                out.append(prefix + line)
+
+    if not out:
+        raise CommandError("", 2 if had_error else 1)
+    return "\n".join(out)
 
 def echo(args: List[str]) -> str:
     return " ".join(args) if args else ""
 
 def list_directory(args: List[str]) -> str:
     long_format = "-l" in args
+    bad = [a for a in args if a.startswith("-") and a != "-l"]
+    if bad:
+        return f"Error: ls: invalid option '{bad[0]}' (only -l is supported)."
     paths = [a for a in args if a != "-l"]
     path = paths[0] if paths else "."
     try:
@@ -117,8 +161,10 @@ def remove_directory(args: List[str]) -> str:
         return f"Directory '{path}' removed successfully."
     except FileNotFoundError:
         return f"Error: Directory '{path}' not found."
-    except OSError as e:
-        return f"Error: {str(e)}"
+    except NotADirectoryError:
+        return f"Error: '{path}' is not a directory."
+    except OSError:
+        return f"Error: Directory '{path}' is not empty (or in use)."
 
 def touch_file(args: List[str]) -> str:
     if not args:
@@ -170,18 +216,20 @@ def remove_file(args: List[str]) -> str:
         return f"Error: {str(e)}"
 
 def concatenate_file(args: List[str]) -> str:
-    if not args:
-        return "Error: No file path provided."
-    path = args[0]
-    try:
-        with open(path, 'r') as f:
-            return f.read()
-    except FileNotFoundError:
-        return f"Error: File '{path}' not found."
-    except IsADirectoryError:
-        return f"Error: '{path}' is a directory."
-    except OSError as e:
-        return f"Error: {str(e)}"
+    if not args:                      # `cat` with no args reads stdin (needed for pipes)
+        return sys.stdin.read()
+    out = []
+    for path in args:
+        try:
+            with open(path, 'r') as f:
+                out.append(f.read())
+        except FileNotFoundError:
+            raise CommandError(f"cat: {path}: No such file or directory")
+        except IsADirectoryError:
+            raise CommandError(f"cat: {path}: Is a directory")
+        except Exception as e:
+            raise CommandError(f"cat: {path}: {e}")
+    return "".join(out)
 
 def change_mode(args: List[str]) -> str:
     if len(args) < 2:
@@ -189,7 +237,10 @@ def change_mode(args: List[str]) -> str:
     mode_str, path = args[0], args[1]
     try:
         mode = int(mode_str, 8)
+        if not 0 <= mode <= 0o777:
+            return f"Error: Invalid mode '{mode_str}'."
         os.chmod(path, mode)
+        MODES[os.path.abspath(path)] = mode
         return f"Permissions of '{path}' changed to '{mode_str}'."
     except ValueError:
         return f"Error: Invalid mode '{mode_str}'."
@@ -200,7 +251,11 @@ def change_mode(args: List[str]) -> str:
 
 def ls_line(filename: str, filepath: str) -> str:
     st = os.stat(filepath)
-    perm = stat.filemode(st.st_mode)
+    mode = MODES.get(os.path.abspath(filepath))
+    if mode is not None:
+        perm = stat.filemode((st.st_mode & ~0o777) | mode)
+    else:
+        perm = stat.filemode(st.st_mode)
     size = st.st_size
     mtime = time.strftime('%b %d %H:%M', time.localtime(st.st_mtime))
     return f"{perm} {size:>8} {mtime} {filename}"
