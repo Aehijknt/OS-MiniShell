@@ -5,6 +5,15 @@ import platform
 import shutil
 import stat
 import time
+import re
+
+class CommandError(Exception):
+    """Raised by a command to signal failure. code = exit status (0 = success).
+    An empty message means 'fail silently' (e.g. grep with no matches)."""
+    def __init__(self, message="", code=1):
+        super().__init__(message)
+        self.message = message
+        self.code = code
 
 ENV_VARS = dict(os.environ)  # Initialize with current environment variables
 
@@ -37,29 +46,59 @@ def read_file(args):
     return '\n'.join(output)
 
 def grep_command(args):
-    if not args:
-        return "Error: No pattern provided for grep."
-
-    pattern = args[0]
-    lines = []
-
-    if len(args) > 1:
-        filepath = args[1]
-        try:
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-        except FileNotFoundError:
-            return f"grep: {filepath}: No such file or directory"
-        except Exception as e:
-            return f"grep: {filepath}: {e}"
-    else:
-        if not sys.stdin.isatty():
-            lines = sys.stdin.readlines()
+    """grep [-i] [-n] [-v] PATTERN [FILE...]  (reads stdin if no file given)
+    Exit status: 0 = match found, 1 = no match, 2 = error."""
+    flags, rest = set(), []
+    for a in args:
+        if not rest and a.startswith('-') and len(a) > 1 and a[1:].isalpha():
+            flags.update(a[1:])
         else:
-            return "Error: No input provided for grep."
-        
-    matched_lines = [line.rstrip('\n') for line in lines if pattern in line]
-    return '\n'.join(matched_lines)
+            rest.append(a)
+
+    bad = flags - set("inv")
+    if bad:
+        raise CommandError(f"grep: invalid option -- '{sorted(bad)[0]}'", 2)
+    if not rest:
+        raise CommandError("grep: usage: grep [-inv] PATTERN [FILE...]", 2)
+
+    pattern, files = rest[0], rest[1:]
+    try:
+        rx = re.compile(pattern, re.IGNORECASE if 'i' in flags else 0)
+    except re.error as e:
+        raise CommandError(f"grep: invalid pattern '{pattern}': {e}", 2)
+
+    sources, had_error = [], False
+    if files:
+        for fp in files:
+            try:
+                with open(fp, 'r') as f:
+                    sources.append((fp, f.read().splitlines()))
+            except FileNotFoundError:
+                print(f"grep: {fp}: No such file or directory", file=sys.stderr)
+                had_error = True
+            except Exception as e:
+                print(f"grep: {fp}: {e}", file=sys.stderr)
+                had_error = True
+    else:
+        if sys.stdin.isatty():
+            raise CommandError("grep: no input (give a file or pipe something in)", 2)
+        sources.append((None, sys.stdin.read().splitlines()))
+
+    out = []
+    for name, lines in sources:
+        for num, line in enumerate(lines, 1):
+            hit = rx.search(line) is not None
+            if hit != ('v' in flags):
+                prefix = ""
+                if len(files) > 1:
+                    prefix += f"{name}:"
+                if 'n' in flags:
+                    prefix += f"{num}:"
+                out.append(prefix + line)
+
+    if not out:
+        raise CommandError("", 2 if had_error else 1)
+    return "\n".join(out)
 
 def echo(args: List[str]) -> str:
     return " ".join(args) if args else ""
@@ -170,18 +209,20 @@ def remove_file(args: List[str]) -> str:
         return f"Error: {str(e)}"
 
 def concatenate_file(args: List[str]) -> str:
-    if not args:
-        return "Error: No file path provided."
-    path = args[0]
-    try:
-        with open(path, 'r') as f:
-            return f.read()
-    except FileNotFoundError:
-        return f"Error: File '{path}' not found."
-    except IsADirectoryError:
-        return f"Error: '{path}' is a directory."
-    except OSError as e:
-        return f"Error: {str(e)}"
+    if not args:                      # `cat` with no args reads stdin (needed for pipes)
+        return sys.stdin.read()
+    out = []
+    for path in args:
+        try:
+            with open(path, 'r') as f:
+                out.append(f.read())
+        except FileNotFoundError:
+            raise CommandError(f"cat: {path}: No such file or directory")
+        except IsADirectoryError:
+            raise CommandError(f"cat: {path}: Is a directory")
+        except Exception as e:
+            raise CommandError(f"cat: {path}: {e}")
+    return "".join(out)
 
 def change_mode(args: List[str]) -> str:
     if len(args) < 2:
