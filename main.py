@@ -10,10 +10,13 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Commands whose output is real data (never treated as an "Error..." message)
 RAW_OUTPUT_COMMANDS = {"echo", "cat", "grep", "env", "sysinfo", "help"}
 
-
 def color(str):
     return f"\033[33m{str}\033[0m"
 
+print(color('==========================================='))
+print(color('                SHELLDON OS                '))
+print(color('==========================================='))
+print(color("Type 'help' for commands or 'exit' to quit.\n"))
 
 def tokenize(s):
     """Split on spaces but keep "quoted text" / 'quoted text' together (quotes removed).
@@ -291,7 +294,7 @@ while True:
         elif absolute_dir.startswith(ROOT_DIR + os.sep):
             rel_path = os.path.relpath(absolute_dir, ROOT_DIR)
             rel_path = rel_path.replace("/", "\\")
-            current_dir = f"minishell/{rel_path}"
+            current_dir = f"minishell\\{rel_path}"
         else:
             current_dir = absolute_dir.split('\\')[-1] or absolute_dir
 

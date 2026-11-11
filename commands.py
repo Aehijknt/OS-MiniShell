@@ -7,6 +7,14 @@ import stat
 import time
 import re
 
+from resources import load_system
+from detection import detect
+from banker import safety, request
+
+from pcb import load_processes
+from algorithms import schedule
+from gantt import render
+
 class CommandError(Exception):
     """Raised by a command to signal failure. code = exit status (0 = success).
     An empty message means 'fail silently' (e.g. grep with no matches)."""
@@ -18,6 +26,102 @@ class CommandError(Exception):
 MODES = {}  # abs path -> mode set by chmod (Windows ignores rwx bits, so we remember them)
 
 ENV_VARS = dict(os.environ)  # Initialize with current environment variables
+
+def deadlock_command(args):
+    if len(args) < 2:
+        return (
+            "Usage: \n"
+            "   deadlock detect <file>\n"
+            "   deadlock banker <file> [--request <PID> <r1> <r2> ...]"
+        )
+
+    subcommand = args[0].lower()
+    filename = args[1]
+
+    try:
+        system = load_system(filename)
+    except FileNotFoundError:
+        return f"deadlock: file not found: '{filename}'"
+    except Exception as e:
+        return f"deadlock: invalid system file: {e}"
+
+    if subcommand == "detect":
+        try: 
+            deadlocked = detect(system)
+            if not deadlocked:
+                return "No deadlocks detected. All processes can finish."
+
+            victim = max(
+                deadlocked,
+            key=lambda pid: sum(system['allocation'][system['processes'].index(pid)])
+            )
+            return (
+                f"Deadlock detected among processes: {', '.join(map(str, deadlocked))}\n"
+                f"Victim process to terminate: {victim}"
+            )
+        except Exception as e:
+            return f"deadlock: error during detection: {e}"
+
+    elif subcommand == "banker":
+        try:
+            if "--request" in args:
+                req_idx = args.index("--request")
+                if len(args) < req_idx + 3:
+                    return "Usage: deadlock banker <file> --request <PID>"
+                
+                pid = args[req_idx + 1]
+                counts = [int(x) for x in args[req_idx + 2:]]
+                granted, message = request(system, pid, counts)
+                return f"Request for {pid} {counts}: {message}"
+
+            is_safe, sequence = safety(system)
+            if is_safe:
+                return f"State is SAFE.\nSafe sequence: {'->'.join(sequence)}"
+            else:
+                return "State is UNSAFE! No safe execution sequence exists."
+        except ValueError as e:
+            return f"deadlock banker error: {e}"
+        except Exception as e:
+            return f"deadllock banker error: {e}"
+
+    else:
+        return f"deadlock: unknown subcommand '{subcommand}'. Use 'detect' or 'banker'."
+
+def sched_command(args):
+    if len(args) < 2:
+        return "Usage: sched <fcfs|sjn|priority|rr|mlq|mlfq> [--quantum N] <processes_file>"
+
+    algorithm = args[0].lower()
+    quantum = 4
+    filename = None
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--quantum":
+            if i + 1 >= len(args):
+                return "sched: --quantum requires a positive integer value"
+            try:
+                quantum = int(args[i + 1])
+            except ValueError:
+                return f"sched: invalid quantum '{args[i + 1]}'"
+            i += 2
+        else:
+            filename = args[i]
+            i += 1
+
+    if not filename:
+        return "sched: missing processes file argument"
+
+    try:
+        processes = load_processes(filename)
+        jobs, timeline = schedule(processes, algorithm, quantum=quantum)
+        return render(jobs, timeline, algorithm)
+    except FileNotFoundError:
+        return f"sched: file not found: '{filename}'"
+    except ValueError as e:
+        return f"sched: {e}"
+    except Exception as e:
+        return f"sched: error running simulation: {e}"
 
 def expand_variables(tokens):
     expanded_tokens = []
@@ -290,7 +394,9 @@ def help_command() -> str:
         "grep [pattern] [file]": "Searches for a pattern in a file.",
         "sysinfo": "Displays system information.",
         "help": "Displays this help message.",
-        "exit": "Exits the command line interface."
+        "exit": "Exits the command line interface.",
+        "deadlock": "Deadlock module",
+        "sched": "Process Scheduling module"
     }
 
     help_text = "Available commands:\n"
@@ -316,5 +422,7 @@ COMMANDS = {
     "grep": grep_command,
     "sysinfo": lambda _: get_system_info(),
     "help": lambda _: help_command(),
-    "exit": lambda _: exit()
+    "exit": lambda _: exit(),
+    "deadlock": deadlock_command,
+    "sched": sched_command
 }
